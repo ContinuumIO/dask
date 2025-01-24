@@ -402,9 +402,12 @@ class GraphNode:
         return False
 
     def __sizeof__(self) -> int:
-        return sum(
-            sizeof(getattr(self, sl)) for sl in type(self).__slots__
-        ) + sys.getsizeof(type(self))
+        all_slots: list[str] = []
+        for t in type(self).mro():
+            all_slots.extend(getattr(t, "__slots__", ()))
+        return sum(sizeof(getattr(self, sl)) for sl in all_slots) + sys.getsizeof(
+            type(self)
+        )
 
     def substitute(
         self, subs: dict[KeyType, KeyType | GraphNode], key: KeyType | None = None
@@ -497,6 +500,9 @@ class Alias(GraphNode):
             target = target.key
         self.target = target
         self._dependencies = frozenset((self.target,))
+
+    def __reduce__(self):
+        return Alias, (self.key, self.target)
 
     def copy(self):
         return Alias(self.key, self.target)
@@ -610,7 +616,7 @@ def _get_dependencies(obj: object) -> set | frozenset:
     return _no_deps
 
 
-class Task(GraphNode):
+class BaseTask(GraphNode):
     func: Callable
     args: tuple
     kwargs: dict
@@ -754,7 +760,7 @@ class Task(GraphNode):
 
     def substitute(
         self, subs: dict[KeyType, KeyType | GraphNode], key: KeyType | None = None
-    ) -> Task:
+    ) -> BaseTask:
         subs_filtered = {
             k: v for k, v in subs.items() if k in self.dependencies and k != v
         }
@@ -787,6 +793,32 @@ class Task(GraphNode):
             )
 
 
+class Task(BaseTask):
+    __slots__ = ()
+
+    def __setstate__(self, state):
+        (
+            self.key,
+            self.func,
+            self.args,
+            self._token,
+            self._data_producer,
+            self._dependencies,
+            self.kwargs,
+        ) = state
+
+    def __getstate__(self):
+        return (
+            self.key,
+            self.func,
+            self.args,
+            self._token,
+            self._data_producer,
+            self._dependencies,
+            self.kwargs,
+        )
+
+
 class NestedContainer(Task):
     constructor: Callable
     klass: type
@@ -809,6 +841,18 @@ class NestedContainer(Task):
             _dependencies=_dependencies,
             **kwargs,
         )
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        # The constructor as a kwarg is redundant since this is encoded in the
+        # class itself. Serializing the builtin types is not trivial
+        # This saves about 15% of overhead
+        state[-1].pop("constructor", None)
+        return state
+
+    def __setstate__(self, state):
+        state[-1]["constructor"] = self.constructor
+        return super().__setstate__(state)
 
     def __repr__(self):
         return f"{type(self).__name__}({self.args})"
